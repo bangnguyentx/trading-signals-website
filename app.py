@@ -160,16 +160,454 @@ def add_indicators(df):
 # =============================================================================
 # 18 TRADING COMBOS (Đã bao gồm 2 combo mới)
 # =============================================================================
+def combo1_fvg_squeeze_pro(df):
+    """FVG Squeeze Pro"""
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        squeeze = (last.bb_width < SQUEEZE_THRESHOLD and 
+                  last.bb_upper < last.kc_upper and 
+                  last.bb_lower > last.kc_lower)
+        breakout_up = last.close > last.bb_upper and prev.close <= prev.bb_upper
+        vol_spike = last.volume > last.volume_ma20 * 1.3  # ✅ SỬA: dùng last.volume_ma20
+        trend_up = last.close > last.ema200
+        rsi_ok = last.rsi14 < 68
+        
+        if squeeze and breakout_up and vol_spike and trend_up and rsi_ok:
+            entry = last.close
+            sl = entry - 1.5 * last.atr
+            tp = entry + 3.0 * last.atr
+            return "LONG", entry, sl, tp, "FVG Squeeze Pro"
+        
+        breakout_down = last.close < last.bb_lower and prev.close >= prev.bb_lower
+        if squeeze and breakout_down and vol_spike and last.close < last.ema200:
+            entry = last.close
+            sl = entry + 1.5 * last.atr
+            tp = entry - 3.0 * last.atr
+            return "SHORT", entry, sl, tp, "FVG Squeeze Pro"
+            
+    except Exception as e:
+        logger.error(f"Combo1 error: {e}")
+    
+    return None
 
-# ... (Copy toàn bộ 16 hàm combo từ combo1 đến combo16 vào đây) ...
-# ... (Tôi sẽ bỏ qua để tiết kiệm không gian, nhưng bạn PHẢI copy chúng vào) ...
+def combo2_macd_ob_retest(df):
+    """MACD Order Block Retest"""
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        macd_cross_up = last.macd > last.macd_signal and prev.macd <= prev.macd_signal
+        price_above_ema200 = last.close > last.ema200
+        
+        ob_zone = None
+        if all(df["close"].iloc[-3:] > df["open"].iloc[-3:]):  # ✅ SỬA: dùng .iloc
+            ob_zone = df["low"].iloc[-5:-2].min()  # ✅ SỬA: dùng .iloc
+        
+        retest = ob_zone is not None and last.low <= ob_zone + last.atr * 0.5
+        vol_confirm = last.volume > df["volume"].mean() * 1.1
+        
+        if macd_cross_up and price_above_ema200 and retest and vol_confirm:
+            entry = last.close
+            sl = ob_zone - last.atr
+            tp = entry + 2.5 * last.atr
+            return "LONG", entry, sl, tp, "MACD Order Block Retest"
+            
+    except Exception as e:
+        logger.error(f"Combo2 error: {e}")
+    
+    return None
 
-# 
-# def combo1_fvg_squeeze_pro(df): ...
-# def combo2_macd_ob_retest(df): ...
-# ...
-# def combo16_rsi_extreme_bounce(df): ...
-#
+def combo3_stop_hunt_squeeze(df):
+    """Stop Hunt Squeeze"""
+    try:
+        last = df.iloc[-1]
+        
+        squeeze = last.bb_width < SQUEEZE_THRESHOLD
+        stop_hunt = False
+        
+        if last.body > 0:
+            if last.close > last.open:
+                stop_hunt = (last.lower_wick / last.body > 2)
+            else:
+                stop_hunt = (last.upper_wick / last.body > 2)
+        
+        breakout_up = last.close > last.bb_upper
+        
+        if squeeze and stop_hunt and breakout_up:
+            entry = last.close
+            sl = last.low - last.atr
+            tp = entry + 2.8 * last.atr
+            return "LONG", entry, sl, tp, "Stop Hunt Squeeze"
+            
+    except Exception as e:
+        logger.error(f"Combo3 error: {e}")
+    
+    return None
+
+def combo4_fvg_ema_pullback(df):
+    """FVG EMA Pullback"""
+    try:
+        last = df.iloc[-1]
+        
+        fvg_bull_zones = df[df["fvg_bull"]]
+        fvg_pullback = False
+        
+        if not fvg_bull_zones.empty and df["fvg_bull"].iloc[-5:].any():  # ✅ SỬA: .iloc + .any()
+            fvg_pullback = last.low <= fvg_bull_zones["high"].max()
+        
+        cross_up = last.ema8 > last.ema21 and df["ema8"].iloc[-2] <= df["ema21"].iloc[-2]
+        
+        if fvg_pullback and cross_up:
+            entry = last.close
+            sl = last.low - last.atr * 0.8
+            tp = entry + 2.0 * last.atr
+            return "LONG", entry, sl, tp, "FVG EMA Pullback"
+            
+    except Exception as e:
+        logger.error(f"Combo4 error: {e}")
+    
+    return None
+
+def combo5_fvg_macd_divergence(df):
+    """FVG + MACD Divergence"""
+    try:
+        last = df.iloc[-1]
+        
+        hist = df["macd_hist"]
+        low = df["low"]
+        
+        divergence = hist.iloc[-1] > hist.iloc[-3] and low.iloc[-1] < low.iloc[-3]
+        fvg = df["fvg_bull"].iloc[-8:].any()  # ✅ SỬA: .iloc + .any()
+        rsi_ok = last.rsi14 < 30
+        
+        if divergence and fvg and rsi_ok:
+            entry = last.close
+            sl = low.iloc[-5:].min() - last.atr  # ✅ SỬA: .iloc
+            tp = entry + 2.5 * last.atr
+            return "LONG", entry, sl, tp, "FVG + MACD Divergence"
+            
+    except Exception as e:
+        logger.error(f"Combo5 error: {e}")
+    
+    return None
+
+def combo6_ob_liquidity_grab(df):
+    """Order Block + Liquidity Grab"""
+    try:
+        last = df.iloc[-1]
+        
+        ob = df["low"].iloc[-6:-3].min()  # ✅ SỬA: .iloc
+        liquidity_grab = (last.lower_wick / last.body > 2.5) if last.body > 0 else False
+        retest_ob = last.close > ob
+        macd_pos = last.macd_hist > 0
+        
+        if liquidity_grab and retest_ob and macd_pos:
+            entry = last.close
+            sl = last.low - last.atr
+            tp = entry + 1.8 * last.atr
+            return "LONG", entry, sl, tp, "Order Block + Liquidity Grab"
+            
+    except Exception as e:
+        logger.error(f"Combo6 error: {e}")
+    
+    return None
+
+def combo7_stop_hunt_fvg_retest(df):
+    """Stop Hunt + FVG Retest"""
+    try:
+        last = df.iloc[-1]
+        
+        stop_hunt = (last.lower_wick / last.body > 2) if last.body > 0 else False
+        fvg_after = df["fvg_bull"].iloc[-3:]  # ✅ SỬA: .iloc
+        retest = (last.low <= df["high"].shift(1).max()) if fvg_after.any() else False  # ✅ SỬA: .any()
+        
+        if stop_hunt and fvg_after.any() and retest:
+            entry = last.close
+            sl = last.low - 0.5 * last.atr
+            tp = entry + 1.5 * last.atr
+            return "LONG", entry, sl, tp, "Stop Hunt + FVG Retest"
+            
+    except Exception as e:
+        logger.error(f"Combo7 error: {e}")
+    
+    return None
+
+def combo8_fvg_macd_hist_spike(df):
+    """FVG + MACD Hist Spike"""
+    try:
+        last = df.iloc[-1]
+        
+        # ❌ HIỆN TẠI: Có thể gặp lỗi shape không khớp
+        # hist_spike = (df["macd_hist"].iloc[-3:].values > df["macd_hist"].iloc[-4:-1].values).all()
+        
+        # ✅ SỬA THÀNH:
+        if len(df) >= 5:
+            current_hist = df["macd_hist"].iloc[-3:].values
+            prev_hist = df["macd_hist"].iloc[-4:-1].values
+            if len(current_hist) == 3 and len(prev_hist) == 3:
+                hist_spike = (current_hist > prev_hist).all()
+            else:
+                hist_spike = False
+        else:
+            hist_spike = False
+            
+        fvg = df["fvg_bull"].iloc[-5:].any()
+        price_above_vwap = last.close > last.vwap
+        
+        if hist_spike and fvg and price_above_vwap:
+            entry = last.close
+            sl = last.low - last.atr
+            tp = entry + 2.5 * last.atr
+            return "LONG", entry, sl, tp, "FVG + MACD Hist Spike"
+            
+    except Exception as e:
+        logger.error(f"Combo8 error: {e}")
+    
+    return None
+
+def combo9_ob_fvg_confluence(df):
+    """OB + FVG Confluence"""
+    try:
+        last = df.iloc[-1]
+        
+        ob = df["low"].iloc[-10:-5].min()  # ✅ SỬA: .iloc
+        fvg_bull_zones = df[df["fvg_bull"]]
+        fvg_zone = 0
+        
+        if not fvg_bull_zones.empty and df["fvg_bull"].iloc[-10:].any():  # ✅ SỬA: .iloc + .any()
+            fvg_zone = fvg_bull_zones["high"].max()
+        
+        confluence = (abs(ob - fvg_zone) < last.atr * 0.5) if fvg_zone > 0 else False
+        engulfing = last.close > last.open and last.open < df["close"].iloc[-2]
+        volume_delta = last.volume > df["volume"].mean() * 1.5
+        
+        if confluence and engulfing and volume_delta:
+            entry = last.close
+            sl = min(ob, fvg_zone) - last.atr if fvg_zone > 0 else ob - last.atr
+            tp = entry + 2.0 * last.atr
+            return "LONG", entry, sl, tp, "OB + FVG Confluence"
+            
+    except Exception as e:
+        logger.error(f"Combo9 error: {e}")
+    
+    return None
+
+def combo10_smc_ultimate(df):
+    """SMC Ultimate"""
+    try:
+        last = df.iloc[-1]
+        
+        squeeze = last.bb_width < SQUEEZE_THRESHOLD
+        fvg = df["fvg_bull"].iloc[-5:].any()  # ✅ SỬA: .iloc + .any()
+        macd_up = last.macd_hist > 0 and last.macd_hist > df["macd_hist"].iloc[-2]
+        liquidity = (last.lower_wick / last.body > 2) if last.body > 0 else False
+        ob_retest = last.low <= df["low"].iloc[-5:-2].min()  # ✅ SỬA: .iloc
+        
+        if squeeze and fvg and macd_up and liquidity and ob_retest:
+            entry = last.close
+            sl = last.low - last.atr
+            tp = entry + 3.5 * last.atr
+            return "LONG", entry, sl, tp, "SMC Ultimate"
+            
+    except Exception as e:
+        logger.error(f"Combo10 error: {e}")
+    
+    return None
+
+def combo11_fvg_ob_liquidity_break(df):
+    """FVG + Order Block + Liquidity Break"""
+    try:
+        last = df.iloc[-1]
+        
+        # FVG bullish
+        fvg = last.fvg_bull or df["fvg_bull"].iloc[-3:].any()  # ✅ SỬA: .iloc + .any()
+        
+        # Order Block
+        ob = df["low"].iloc[-5:].min()  # ✅ SỬA: .iloc
+        
+        # Liquidity Break
+        liquidity_break = last.close > df["high"].iloc[-5:].max()  # ✅ SỬA: .iloc
+        
+        # Volume
+        vol_spike = last.volume > last.volume_ma20 * 1.5  # ✅ SỬA: last.volume_ma20
+        
+        if fvg and liquidity_break and vol_spike:
+            entry = last.close
+            sl = ob - 0.5 * last.atr
+            tp = entry + 2.0 * last.atr
+            return "LONG", entry, sl, tp, "FVG OB Liquidity Break"
+            
+    except Exception as e:
+        logger.error(f"Combo11 error: {e}")
+    
+    return None
+
+def combo12_liquidity_grab_fvg_retest(df):
+    """Liquidity Grab + FVG Retest"""
+    try:
+        last = df.iloc[-1]
+        
+        # Liquidity Grab
+        liquidity_grab = (last.lower_wick / last.body > 2.5) if last.body > 0 else False
+        
+        # FVG Retest
+        fvg_zones = df[df["fvg_bull"]]
+        fvg_retest = False
+        if not fvg_zones.empty and df["fvg_bull"].iloc[-5:].any():  # ✅ SỬA: .iloc + .any()
+            fvg_retest = last.low <= fvg_zones["high"].max()
+        
+        # MACD
+        macd_ok = last.macd_hist > 0 and last.macd_hist > df["macd_hist"].iloc[-2]
+        
+        if liquidity_grab and fvg_retest and macd_ok:
+            entry = last.close
+            sl = last.low - 0.8 * last.atr
+            tp = entry + 1.8 * last.atr
+            return "LONG", entry, sl, tp, "Liquidity Grab FVG Retest"
+            
+    except Exception as e:
+        logger.error(f"Combo12 error: {e}")
+    
+    return None
+
+def combo13_fvg_macd_momentum_scalp(df):
+    """COMBO 13: FVG + MACD Momentum Scalp (✅ ĐÃ SỬA HOÀN CHỈNH)"""
+    try:
+        last = df.iloc[-1]
+        
+        # FVG recent
+        fvg = df["fvg_bull"].iloc[-2:].any() and last.close > last.open  # ✅ SỬA: .iloc + .any()
+        
+        # MACD momentum
+        macd_mom = last.macd > last.macd_signal and abs(last.macd_hist) > abs(df["macd_hist"].iloc[-2])
+        
+        # VWAP
+        above_vwap = last.close > last.vwap
+        
+        # Low volatility
+        low_vol = (last.atr / last.close) < 0.02
+        
+        if fvg and macd_mom and above_vwap and low_vol:  # ✅ SỬA: lỗi chính tả "and" thay vì "andkhông"
+            entry = last.close
+            sl = last.low - 0.5 * last.atr
+            tp = entry + 1.2 * last.atr
+            return "LONG", entry, sl, tp, "FVG MACD Momentum Scalp"
+            
+    except Exception as e:
+        logger.error(f"Combo13 error: {e}")
+    
+    return None
+
+def combo14_ob_liquidity_macd_div(df):
+    """COMBO 14: Order Block + Liquidity + MACD Divergence (✅ ĐÃ SỬA HOÀN CHỈNH)"""
+    try:
+        last = df.iloc[-1]
+        
+        # Order Block
+        ob = df["low"].iloc[-7:-2].min()  # ✅ SỬA: .iloc
+        
+        # Liquidity sweep
+        liquidity = (last.lower_wick / last.body > 2.0) if last.body > 0 else False
+        
+        # MACD Divergence
+        divergence = (df["macd_hist"].iloc[-1] > df["macd_hist"].iloc[-3] and 
+                     df["low"].iloc[-1] < df["low"].iloc[-3])
+        
+        # Entry confirmation
+        entry_ok = last.close > ob
+        
+        if liquidity and divergence and entry_ok:
+            entry = last.close
+            sl = ob - 0.3 * last.atr
+            tp = entry + 2.5 * last.atr
+            return "LONG", entry, sl, tp, "OB Liquidity MACD Div"  # ✅ SỬA: Thêm return
+            
+    except Exception as e:
+        logger.error(f"Combo14 error: {e}")
+    
+    return None
+
+def combo15_vwap_ema_volume_scalp(df):
+    """COMBO 15: VWAP + EMA Cross + Volume Spike Scalp (✅ MỚI)"""
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # EMA Cross (8 & 21)
+        ema_cross = last.ema8 > last.ema21 and prev.ema8 <= prev.ema21
+        
+        # Price above VWAP
+        above_vwap = last.close > last.vwap
+        
+        # Volume spike (180% of 20-period average)
+        vol_spike = last.volume > last.volume_ma20 * 1.8  # ✅ SỬA: last.volume_ma20
+        
+        # RSI not overbought (below 60)
+        rsi_ok = last.rsi14 < 60
+        
+        if ema_cross and above_vwap and vol_spike and rsi_ok:
+            entry = last.close
+            sl = last.low - 0.5 * last.atr
+            tp = entry + 1.0 * last.atr
+            return "LONG", entry, sl, tp, "VWAP EMA Volume Scalp"
+            
+    except Exception as e:
+        logger.error(f"Combo15 error: {e}")
+    
+    return None
+
+def combo16_rsi_extreme_bounce(df):
+    """COMBO 16: RSI Extreme + Price Action Bounce (✅ MỚI)"""
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # RSI Extreme (oversold for long, overbought for short)
+        rsi_oversold = last.rsi14 < 25
+        rsi_overbought = last.rsi14 > 75
+        
+        # Price Action Bounce patterns
+        bullish_engulfing = (last.close > last.open and 
+                           prev.close < prev.open and 
+                           last.close > prev.open and 
+                           last.open < prev.close)
+        
+        bearish_engulfing = (last.close < last.open and 
+                           prev.close > prev.open and 
+                           last.close < prev.open and 
+                           last.open > prev.close)
+        
+        hammer = (last.lower_wick > 2 * last.body and 
+                last.upper_wick < 0.2 * last.body and 
+                last.close > last.open) if last.body > 0 else False
+                
+        shooting_star = (last.upper_wick > 2 * last.body and 
+                       last.lower_wick < 0.2 * last.body and 
+                       last.close < last.open) if last.body > 0 else False
+        
+        # Volume confirmation
+        vol_ok = last.volume > last.volume_ma20 * 1.2  # ✅ SỬA: last.volume_ma20
+        
+        # LONG: RSI oversold + bullish pattern
+        if rsi_oversold and (bullish_engulfing or hammer) and vol_ok:
+            entry = last.close
+            sl = last.low - 0.8 * last.atr
+            tp = entry + 1.5 * last.atr
+            return "LONG", entry, sl, tp, "RSI Extreme Bounce LONG"
+            
+        # SHORT: RSI overbought + bearish pattern  
+        if rsi_overbought and (bearish_engulfing or shooting_star) and vol_ok:
+            entry = last.close
+            sl = last.high + 0.8 * last.atr
+            tp = entry - 1.5 * last.atr
+            return "SHORT", entry, sl, tp, "RSI Extreme Bounce SHORT"
+            
+    except Exception as e:
+        logger.error(f"Combo16 error: {e}")
+    
+    return None
 
 # Thêm 2 combo mới
 def combo17_ema_stack_volume_confirmation(df):
@@ -494,30 +932,42 @@ def index():
     # index.html sẽ chứa cả dashboard và bảng tín hiệu
     return render_template('index.html')
 
-# =g===========================================================================
+# =============================================================================
 # MAIN EXECUTION
 # =============================================================================
 
 # Hàm này được gọi bởi render.yaml (worker)
 def run_scheduler():
-    logger.info("🚀 Khởi chạy Background Scheduler...")
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(scan, 'interval', minutes=SCAN_INTERVAL_MINUTES)
+    """
+    Chạy BackgroundScheduler ở chế độ CRON.
+    Được tối ưu để chạy 1 phút SAU KHI nến 15m đóng.
+    """
+    logger.info("🚀 Khởi chạy Background Scheduler (Chế độ Cron Đồng bộ)...")
+    # Luôn chỉ định timezone là UTC để cron chạy đúng
+    scheduler = BackgroundScheduler(timezone="UTC") 
     
-    # Chạy lần quét đầu tiên ngay lập tức
-    logger.info("🔍 Chạy lần quét đầu tiên...")
+    # XÓA DÒNG CŨ:
+    # scheduler.add_job(scan, 'interval', minutes=SCAN_INTERVAL_MINUTES)
+    
+    # THÊM DÒNG MỚI (Sử dụng 'cron' để đồng bộ với nến 15m):
+    # Nến 15m đóng vào các phút: 00, 15, 30, 45.
+    # Chúng ta chạy bot vào các phút: 1, 16, 31, 46 (luôn +1 phút đệm).
+    scheduler.add_job(scan, 'cron', minute='1,16,31,46') 
+    
+    # Chạy lần quét đầu tiên ngay lập tức khi worker khởi động
+    logger.info("🔍 Chạy lần quét đầu tiên (khởi động)...")
     try:
         scan()
     except Exception as e:
         logger.error(f"❌ Lỗi quét lần đầu: {e}")
         
     scheduler.start()
-    logger.info(f"✅ Scheduler đã bắt đầu (quét mỗi {SCAN_INTERVAL_MINUTES} phút)")
+    logger.info(f"✅ Scheduler đã bắt đầu (Chạy cron vào các phút 1, 16, 31, 46 UTC)")
     
-    # Giữ cho worker chạy
+    # Giữ cho worker chạy (cần thiết cho Render worker)
     try:
         while True:
-            time.sleep(3600)
+            time.sleep(3600) # Ngủ 1 giờ, scheduler vẫn chạy nền
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
         logger.info("Scheduler đã dừng.")
