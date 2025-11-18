@@ -1,0 +1,9 @@
+# trading-signals-website/requirements.txt
+flask
+pandas
+requests
+apscheduler
+numpy
+python-dotenv
+ta
+gunicorn # Cần thiết để deploy trên Render
