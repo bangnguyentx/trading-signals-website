@@ -1,0 +1,2 @@
+# trading-signals-website/runtime.txt
+python-3.11.7
