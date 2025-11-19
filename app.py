@@ -1006,50 +1006,88 @@ def vote_signal(signal_id, vote_type):
 def index():
     """Render trang chủ (index.html)"""
     return render_template('index.html')
+    
+@app.route('/api/debug')
+def debug_info():
+    """API debug để kiểm tra trạng thái hệ thống"""
+    import threading
+    import tempfile
+    
+    # Kiểm tra thread đang chạy
+    threads = []
+    for thread in threading.enumerate():
+        threads.append({
+            'name': thread.name,
+            'daemon': thread.daemon,
+            'alive': thread.is_alive()
+        })
+    
+    info = {
+        "service": "Trading Signals Website",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "environment": "RENDER" if os.getenv('RENDER') else "LOCAL",
+        "data_file": DATA_FILE,
+        "file_exists": os.path.exists(DATA_FILE),
+        "coins_count": len(COINS),
+        "active_threads": threads,
+        "temp_dir": tempfile.gettempdir(),
+        "current_utc": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    }
+    
+    return jsonify(info)
 
+@app.route('/api/test-scan')
+def test_scan():
+    """API để test scan thủ công"""
+    try:
+        logger.info("🧪 BẮT ĐẦU TEST SCAN THỦ CÔNG...")
+        scan()
+        return jsonify({"message": "✅ Test scan hoàn thành", "status": "success"})
+    except Exception as e:
+        logger.error(f"💥 Lỗi test scan: {e}")
+        return jsonify({"error": str(e)}), 500
 # =============================================================================
-# MAIN EXECUTION - ĐÃ SỬA
+# MAIN EXECUTION - SỬA LẠI CHO RENDER
 # =============================================================================
 
 def run_scheduler():
     """
     Chạy BackgroundScheduler ở chế độ CRON.
-    Được tối ưu để chạy 1 phút SAU KHI nến 15m đóng.
     """
-    logger.info("🚀 Khởi chạy Background Scheduler (Chế độ Cron Đồng bộ)...")
-    # Luôn chỉ định timezone là UTC để cron chạy đúng
-    scheduler = BackgroundScheduler(timezone="UTC") 
-    
-    # Sử dụng 'cron' để đồng bộ với nến 15m
-    scheduler.add_job(scan, 'cron', minute='1,16,31,46') 
-    
-    # Chạy lần quét đầu tiên ngay lập tức khi worker khởi động
-    logger.info("🔍 Chạy lần quét đầu tiên (khởi động)...")
     try:
-        scan()
-    except Exception as e:
-        logger.error(f"❌ Lỗi quét lần đầu: {e}")
+        logger.info("🎬 BẮT ĐẦU CHẠY SCHEDULER...")
+        # Luôn chỉ định timezone là UTC để cron chạy đúng
+        scheduler = BackgroundScheduler(timezone="UTC") 
         
-    scheduler.start()
-    logger.info(f"✅ Scheduler đã bắt đầu (Chạy cron vào các phút 1, 16, 31, 46 UTC)")
-    
-    # Giữ cho worker chạy (cần thiết cho Render worker)
-    try:
+        # Sử dụng 'cron' để đồng bộ với nến 15m
+        scheduler.add_job(scan, 'cron', minute='1,16,31,46') 
+        
+        # Chạy lần quét đầu tiên ngay lập tức
+        logger.info("🔍 Chạy lần quét đầu tiên (khởi động)...")
+        scan()
+        
+        scheduler.start()
+        logger.info(f"✅ SCHEDULER ĐÃ BẮT ĐẦU (Chạy cron vào các phút 1, 16, 31, 46 UTC)")
+        
+        # Giữ cho scheduler chạy
         while True:
-            time.sleep(3600) # Ngủ 1 giờ, scheduler vẫn chạy nền
-    except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown()
-        logger.info("Scheduler đã dừng.")
+            time.sleep(3600)
+            
+    except Exception as e:
+        logger.error(f"💥 LỖI SCHEDULER: {e}")
 
-if __name__ == "__main__":
-    # LUÔN chạy scheduler, cả trên Render và local
-    logger.info("🚀 Khởi chạy Scheduler (Render + Local)...")
-    
-    # Chạy scheduler trong thread riêng
+# Chạy scheduler ngay khi import (cho Render)
+import os
+if os.getenv('RENDER'):
+    logger.info("🚀 ĐANG TRÊN RENDER - KHỞI ĐỘNG SCHEDULER...")
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
     scheduler_thread.start()
-    
-    # Chạy Flask web
+else:
+    logger.info("🚀 ĐANG CHẠY LOCAL - CHUẨN BỊ SCHEDULER...")
+
+if __name__ == "__main__":
+    # Trên Render, cái này có thể không chạy (vì dùng gunicorn)
+    # Nhưng chúng ta đã chạy scheduler ở trên rồi
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"🌐 Khởi chạy Flask server tại http://0.0.0.0:{port}...")
+    logger.info(f"🌐 KHỞI CHẠY FLASK SERVER tại http://0.0.0.0:{port}...")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
