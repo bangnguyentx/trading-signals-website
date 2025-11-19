@@ -1055,7 +1055,9 @@ def run_scheduler():
     Chạy BackgroundScheduler ở chế độ CRON.
     """
     try:
-        logger.info("🎬 BẮT ĐẦU CHẠY SCHEDULER...")
+        logger.info("🎬 BẮT ĐẦU CHẠY SCHEDULER TRÊN RENDER...")
+        logger.info(f"📊 Sẽ quét {len(COINS)} coins với {len(COINS)*18} combo")
+        
         # Luôn chỉ định timezone là UTC để cron chạy đúng
         scheduler = BackgroundScheduler(timezone="UTC") 
         
@@ -1067,7 +1069,8 @@ def run_scheduler():
         scan()
         
         scheduler.start()
-        logger.info(f"✅ SCHEDULER ĐÃ BẮT ĐẦU (Chạy cron vào các phút 1, 16, 31, 46 UTC)")
+        logger.info("✅ SCHEDULER ĐÃ BẮT ĐẦU THÀNH CÔNG!")
+        logger.info("⏰ Lịch quét: phút 1, 16, 31, 46 mỗi giờ (UTC)")
         
         # Giữ cho scheduler chạy
         while True:
@@ -1075,19 +1078,26 @@ def run_scheduler():
             
     except Exception as e:
         logger.error(f"💥 LỖI SCHEDULER: {e}")
+        import traceback
+        logger.error(f"📋 Chi tiết lỗi: {traceback.format_exc()}")
 
-# Chạy scheduler ngay khi import (cho Render)
-import os
-if os.getenv('RENDER'):
-    logger.info("🚀 ĐANG TRÊN RENDER - KHỞI ĐỘNG SCHEDULER...")
-    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-    scheduler_thread.start()
-else:
-    logger.info("🚀 ĐANG CHẠY LOCAL - CHUẨN BỊ SCHEDULER...")
+# =============================================================================
+# KHỞI ĐỘNG ỨNG DỤNG - SỬA QUAN TRỌNG
+# =============================================================================
+
+# CHẠY SCHEDULER TRÊN CẢ RENDER VÀ LOCAL
+logger.info("🚀 ỨNG DỤNG ĐANG KHỞI ĐỘNG...")
+logger.info(f"🌍 Môi trường: {'RENDER' if os.getenv('RENDER') else 'LOCAL'}")
+logger.info(f"📁 Data file: {DATA_FILE}")
+logger.info(f"🎯 Số coins: {len(COINS)}")
+
+# Luôn chạy scheduler trong thread riêng
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True, name="Scheduler-Thread")
+scheduler_thread.start()
+logger.info("🧵 Đã khởi động scheduler thread")
 
 if __name__ == "__main__":
-    # Trên Render, cái này có thể không chạy (vì dùng gunicorn)
-    # Nhưng chúng ta đã chạy scheduler ở trên rồi
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🌐 KHỞI CHẠY FLASK SERVER tại http://0.0.0.0:{port}...")
+    logger.info("📡 Server sẵn sàng nhận request!")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
