@@ -1,24 +1,14 @@
-# trading-signals-website/render.yaml
 services:
-  # 1. Dịch vụ Web (chạy app Flask)
   - type: web
-    name: trading-signals-web
+    name: trading-signals-website
     env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app" # Sử dụng gunicorn cho production
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.7
-      # Thêm các biến môi trường khác nếu cần
-      # - key: ADMIN_SECRET
-      #   value: "your-secret-key"
-
-  # 2. Dịch vụ Worker (chạy hàm scan() nền)
-  - type: worker
-    name: trading-signals-scanner
-    env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python -c 'from app import run_scheduler; run_scheduler()'" # Chạy scheduler
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.7
+        value: 3.11.0
+      - key: INTERVAL
+        value: 15m
+      - key: LIMIT
+        value: "500"
