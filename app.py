@@ -1,4 +1,4 @@
-# trading-signals-website/app.py
+sẽ# trading-signals-website/app.py
 
 import os
 import json
@@ -51,21 +51,27 @@ DATA_FILE = os.path.join('data', 'signals.json')
 # FILE STORAGE FUNCTIONS (Thread-safe)
 # =============================================================================
 
+# THAY ĐỔI đường dẫn DATA_FILE
+import tempfile
+
+# Sử dụng thư mục tạm thay vì thư mục 'data/'
+DATA_FILE = os.path.join(tempfile.gettempdir(), 'trading_signals.json')
+# Hoặc sử dụng thư mục hiện tại
+DATA_FILE = 'trading_signals.json'
+
 def load_data():
-    """Tải file JSON một cách an toàn (dùng trong lock)"""
-    if not os.path.exists('data'):
-        os.makedirs('data')
-        
-    if not os.path.exists(DATA_FILE):
-        save_data({"signals": []})  # Tạo file nếu chưa có
-        return {"signals": []}
+    """Tải file JSON với xử lý lỗi tốt hơn"""
     try:
-        with open(DATA_FILE, "r", encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        logger.error(f"Lỗi đọc {DATA_FILE}: {e}. Tạo file mới.")
-        save_data({"signals": []})
-        return {"signals": []}
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r", encoding='utf-8') as f:
+                data = json.load(f)
+                logger.info(f"✅ Đã tải {len(data.get('signals', []))} tín hiệu từ {DATA_FILE}")
+                return data
+    except Exception as e:
+        logger.error(f"❌ Lỗi đọc {DATA_FILE}: {e}")
+    
+    # Trả về data mặc định nếu có lỗi
+    return {"signals": []}
 
 def save_data(data):
     """Lưu file JSON một cách an toàn (dùng trong lock)"""
@@ -84,30 +90,58 @@ def save_data(data):
 # =============================================================================
 
 def get_klines(symbol, max_retries=3):
-    """Fetch klines from Binance Futures API with retry mechanism"""
-    url = f"https://fapi.binance.com/fapi/v1/klines"
-    params = { "symbol": symbol, "interval": INTERVAL, "limit": LIMIT }
+    """Fetch klines với xử lý lỗi tốt hơn"""
+    url = "https://fapi.binance.com/fapi/v1/klines"
+    params = {"symbol": symbol, "interval": INTERVAL, "limit": LIMIT}
+    
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
+            response = requests.get(url, params=params, timeout=15)
+            
+            # Kiểm tra response
+            if response.status_code != 200:
+                logger.error(f"❌ Binance API error {response.status_code} cho {symbol}")
+                continue
+                
             data = response.json()
+            
+            # Kiểm tra nếu Binance trả về lỗi
+            if isinstance(data, dict) and 'code' in data:
+                logger.error(f"❌ Binance error cho {symbol}: {data.get('msg')}")
+                return None
+                
+            # Kiểm tra dữ liệu trả về
+            if not data or len(data) < 100:  # Ít nhất 100 nến
+                logger.warning(f"⚠️ Không đủ dữ liệu cho {symbol}: {len(data) if data else 0} nến")
+                return None
+                
+            # Tạo DataFrame
             df = pd.DataFrame(data, columns=[
                 "open_time", "open", "high", "low", "close", "volume", 
                 "close_time", "quote_volume", "trades", "taker_buy_base", 
                 "taker_buy_quote", "ignore"
             ])
+            
+            # Chuyển đổi kiểu dữ liệu
             for col in ["open", "high", "low", "close", "volume"]:
-                df[col] = df[col].astype(float)
-            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-            logger.info(f"✅ Fetched {len(df)} candles for {symbol}")
-            return df
-        except Exception as e:
-            logger.error(f"Attempt {attempt + 1}/{max_retries} failed for {symbol}: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Loại bỏ NaN values
+            df = df.dropna()
+            
+            if len(df) < 100:
+                logger.warning(f"⚠️ {symbol} có quá nhiều NaN, chỉ còn {len(df)} nến")
                 return None
+                
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+            logger.info(f"✅ {symbol}: {len(df)} nến, giá mới nhất: {df['close'].iloc[-1]:.4f}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed for {symbol}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+    
     return None
 
 def add_indicators(df):
@@ -731,8 +765,9 @@ def check_cooldown(symbol, combo_name, all_signals):
 # =============================================================================
 
 def scan():
-    """Hàm quét chính - kiểm tra tất cả combo và lưu vào signals.json"""
-    logger.info(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}] 🔍 Bắt đầu chu kỳ quét...")
+def scan():
+    """Hàm quét chính - với logging chi tiết để debug"""
+    logger.info(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}] 🔍 Bắt đầu chu kỳ quét {len(COINS)} coins...")
     signals_found_this_run = 0
 
     # Danh sách tất cả 18 combo
@@ -746,32 +781,60 @@ def scan():
         combo17_ema_stack_volume_confirmation, combo18_support_resistance_break_retest
     ]
     
+    logger.info(f"📊 Sẽ kiểm tra {len(combos)} combo cho mỗi coin")
+
     # Tải dữ liệu tín hiệu HIỆN TẠI (một lần) để kiểm tra cooldown
     with data_lock:
         data = load_data()
         all_signals = data.get("signals", [])
+        logger.info(f"📁 Hiện có {len(all_signals)} tín hiệu trong database")
 
     for coin in COINS:
         try:
+            logger.info(f"🎯 Đang xử lý {coin}...")
             df = get_klines(coin)
-            if df is None or len(df) < 200:
-                logger.warning(f"⚠️ Không đủ dữ liệu cho {coin}")
+            
+            if df is None:
+                logger.warning(f"❌ Không lấy được dữ liệu cho {coin}")
+                continue
+                
+            if len(df) < 200:
+                logger.warning(f"⚠️ Không đủ dữ liệu cho {coin}: chỉ có {len(df)} nến")
                 continue
             
-            df = add_indicators(df.copy()) # Thêm .copy() để tránh SettingWithCopyWarning
+            logger.info(f"✅ {coin}: {len(df)} nến, giá cuối: {df['close'].iloc[-1]:.4f}")
+            
+            # Kiểm tra dữ liệu NaN
+            if df['close'].isna().any():
+                logger.warning(f"⚠️ {coin} có dữ liệu NaN, đang làm sạch...")
+                df = df.dropna()
+                if len(df) < 200:
+                    logger.warning(f"⚠️ Sau khi làm sạch, {coin} chỉ còn {len(df)} nến")
+                    continue
 
-            for combo_func in combos:
+            df = add_indicators(df.copy())
+            logger.info(f"📈 {coin}: Đã thêm indicators, đang kiểm tra combo...")
+
+            combo_checked = 0
+            combo_found = 0
+
+            for i, combo_func in enumerate(combos, 1):
                 try:
+                    combo_checked += 1
                     result = combo_func(df)
                     if result:
                         direction, entry, sl, tp, combo_name = result
+                        combo_found += 1
+                        
+                        logger.info(f"🎯 {coin} - COMBO{i}: TÌM THẤY TÍN HIỆU - {combo_name}")
                         
                         # 1. Kiểm tra Cooldown
                         if not check_cooldown(coin, combo_name, all_signals):
-                            continue # Bỏ qua nếu đang trong cooldown
+                            logger.info(f"⏳ {coin} - {combo_name}: Đang trong cooldown, bỏ qua")
+                            continue
 
                         # 2. Tạo tín hiệu
-                        signal_id = str(uuid.uuid4()) # Tạo ID duy nhất
+                        signal_id = str(uuid.uuid4())
                         now_utc = datetime.now(timezone.utc)
                         
                         risk = abs(entry - sl)
@@ -788,35 +851,37 @@ def scan():
                             "combo_name": combo_name,
                             "combo_details": COMBO_DETAILS.get(combo_name, "Không có mô tả chi tiết."),
                             "rr": round(rr_ratio, 2),
-                            "timestamp": now_utc.isoformat(), # Lưu giờ UTC theo chuẩn ISO
-                            "status": "active", # 'active' hoặc 'closed'
+                            "timestamp": now_utc.isoformat(),
+                            "status": "active",
                             "votes_win": 0,
                             "votes_lose": 0,
-                            "voted_ips": [] # Ngăn chặn vote nhiều lần
+                            "voted_ips": []
                         }
                         
                         # 3. Lưu tín hiệu (Thread-safe)
                         with data_lock:
-                            # Tải lại data để đảm bảo tính toàn vẹn
                             current_data = load_data()
                             current_data.setdefault("signals", []).append(new_signal)
                             save_data(current_data)
-                            
-                            # Cập nhật all_signals để check cooldown cho vòng lặp sau
-                            all_signals.append(new_signal) 
+                            all_signals.append(new_signal)
                         
                         signals_found_this_run += 1
-                        logger.info(f"✅ Tín hiệu MỚI: {coin} - {combo_name}")
+                        logger.info(f"✅ ĐÃ LƯU: {coin} - {combo_name} - Entry: {entry:.4f}, SL: {sl:.4f}, TP: {tp:.4f}, RR: 1:{rr_ratio:.1f}")
                         
                         # Chỉ lấy 1 tín hiệu mỗi coin mỗi lần quét
                         break 
+                    else:
+                        logger.debug(f"❌ {coin} - COMBO{i}: Không đạt điều kiện")
+                        
                 except Exception as e:
-                    logger.error(f"❌ Lỗi combo {combo_func.__name__} cho {coin}: {e}")
+                    logger.error(f"💥 {coin} - COMBO{i} ({combo_func.__name__}) lỗi: {e}")
+                    
+            logger.info(f"📊 {coin}: Đã kiểm tra {combo_checked} combo, tìm thấy {combo_found} tín hiệu")
                     
         except Exception as e:
-            logger.error(f"❌ Lỗi quét {coin}: {e}")
+            logger.error(f"💥 Lỗi xử lý {coin}: {e}")
 
-    logger.info(f"✅ Quét xong. Tìm thấy {signals_found_this_run} tín hiệu mới.")
+    logger.info(f"✅ Quét xong. Tìm thấy {signals_found_this_run} tín hiệu mới trong lần quét này.")
 
 # =============================================================================
 # FLASK API ROUTES (Cung cấp data cho Frontend)
@@ -972,23 +1037,18 @@ def run_scheduler():
         scheduler.shutdown()
         logger.info("Scheduler đã dừng.")
 
-# Hàm này được gọi khi chạy local hoặc bởi render.yaml (web)
+# THAY THẾ đoạn code __main__ bằng:
+
 if __name__ == "__main__":
-    # Khi chạy local, chúng ta cần chạy cả web và scheduler
-    # Khi deploy, Render sẽ chạy 2 tiến trình riêng biệt
+    # LUÔN chạy scheduler, cả trên Render và local
+    logger.info("🚀 Khởi chạy Scheduler (Render + Local)...")
     
-    if os.getenv("RENDER"):
-        # Nếu đang trên Render, Gunicorn sẽ chạy app
-        logger.info("🚀 Đang chạy trên Render (chỉ khởi chạy web)...")
-    else:
-        # Nếu chạy local (python app.py)
-        logger.info("🚀 Khởi chạy ở chế độ local (Web + Scheduler)...")
-        # Chạy scheduler trong 1 thread riêng
-        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
-        scheduler_thread.start()
-        
-        # Chạy Flask web
-        port = int(os.environ.get('PORT', 5000))
-        logger.info(f"🌐 Khởi chạy Flask server tại http://0.0.0.0:{port}...")
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    # Chạy scheduler trong thread riêng
+    scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+    scheduler_thread.start()
+    
+    # Chạy Flask web
+    port = int(os.environ.get('PORT', 5000))
+    logger.info(f"🌐 Khởi chạy Flask server tại http://0.0.0.0:{port}...")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
