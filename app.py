@@ -1,4 +1,4 @@
-sẽ# trading-signals-website/app.py
+# trading-signals-website/app.py
 
 import os
 import json
@@ -6,6 +6,7 @@ import threading
 import logging
 import time
 import uuid
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -40,23 +41,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Khóa an toàn luồng (Thread-safety lock)
-# Rất quan trọng vì Flask (web thread) và Scheduler (scan thread)
-# sẽ cùng truy cập file signals.json
 data_lock = threading.Lock()
 
-# Đường dẫn file dữ liệu
-DATA_FILE = os.path.join('data', 'signals.json')
-
 # =============================================================================
-# FILE STORAGE FUNCTIONS (Thread-safe)
+# FILE STORAGE FUNCTIONS (Thread-safe) - ĐÃ SỬA
 # =============================================================================
 
-# THAY ĐỔI đường dẫn DATA_FILE
-import tempfile
-
-# Sử dụng thư mục tạm thay vì thư mục 'data/'
-DATA_FILE = os.path.join(tempfile.gettempdir(), 'trading_signals.json')
-# Hoặc sử dụng thư mục hiện tại
+# Sử dụng thư mục hiện tại cho đơn giản
 DATA_FILE = 'trading_signals.json'
 
 def load_data():
@@ -67,6 +58,8 @@ def load_data():
                 data = json.load(f)
                 logger.info(f"✅ Đã tải {len(data.get('signals', []))} tín hiệu từ {DATA_FILE}")
                 return data
+        else:
+            logger.info(f"📁 File {DATA_FILE} chưa tồn tại, tạo mới")
     except Exception as e:
         logger.error(f"❌ Lỗi đọc {DATA_FILE}: {e}")
     
@@ -80,34 +73,40 @@ def save_data(data):
         with open(temp_file, "w", encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         os.replace(temp_file, DATA_FILE)
+        logger.info(f"💾 Đã lưu {len(data.get('signals', []))} tín hiệu vào {DATA_FILE}")
     except Exception as e:
-        logger.error(f"Lỗi lưu {DATA_FILE}: {e}")
+        logger.error(f"❌ Lỗi lưu {DATA_FILE}: {e}")
         if os.path.exists(temp_file):
             os.remove(temp_file)
 
 # =============================================================================
-# BINANCE API & INDICATORS (Giữ nguyên từ code gốc)
+# BINANCE API & INDICATORS - ĐÃ SỬA
 # =============================================================================
 
 def get_klines(symbol, max_retries=3):
-    """Fetch klines với xử lý lỗi tốt hơn"""
+    """Fetch klines từ Binance Futures API với xử lý lỗi tốt hơn"""
     url = "https://fapi.binance.com/fapi/v1/klines"
     params = {"symbol": symbol, "interval": INTERVAL, "limit": LIMIT}
+    
+    logger.info(f"📡 Đang lấy dữ liệu cho {symbol}...")
     
     for attempt in range(max_retries):
         try:
             response = requests.get(url, params=params, timeout=15)
             
-            # Kiểm tra response
+            # Kiểm tra HTTP status code
             if response.status_code != 200:
-                logger.error(f"❌ Binance API error {response.status_code} cho {symbol}")
+                logger.error(f"❌ Binance API error {response.status_code} cho {symbol}: {response.text}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
                 continue
                 
             data = response.json()
             
-            # Kiểm tra nếu Binance trả về lỗi
+            # Kiểm tra nếu Binance trả về lỗi (dạng dict)
             if isinstance(data, dict) and 'code' in data:
-                logger.error(f"❌ Binance error cho {symbol}: {data.get('msg')}")
+                error_msg = data.get('msg', 'Unknown error')
+                logger.error(f"❌ Binance API error cho {symbol}: {error_msg} (code: {data.get('code')})")
                 return None
                 
             # Kiểm tra dữ liệu trả về
@@ -122,25 +121,46 @@ def get_klines(symbol, max_retries=3):
                 "taker_buy_quote", "ignore"
             ])
             
-            # Chuyển đổi kiểu dữ liệu
+            # Chuyển đổi kiểu dữ liệu với xử lý lỗi
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
-            # Loại bỏ NaN values
-            df = df.dropna()
+            # Kiểm tra và loại bỏ NaN values
+            nan_count = df[["open", "high", "low", "close", "volume"]].isna().sum().sum()
+            if nan_count > 0:
+                logger.warning(f"⚠️ {symbol} có {nan_count} giá trị NaN, đang làm sạch...")
+                df = df.dropna()
             
             if len(df) < 100:
                 logger.warning(f"⚠️ {symbol} có quá nhiều NaN, chỉ còn {len(df)} nến")
                 return None
                 
+            # Chuyển đổi thời gian
             df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-            logger.info(f"✅ {symbol}: {len(df)} nến, giá mới nhất: {df['close'].iloc[-1]:.4f}")
+            
+            logger.info(f"✅ {symbol}: Lấy thành công {len(df)} nến, giá cuối: {df['close'].iloc[-1]:.4f}")
             return df
             
-        except Exception as e:
-            logger.error(f"Attempt {attempt + 1} failed for {symbol}: {e}")
+        except requests.exceptions.Timeout:
+            logger.error(f"⏰ Timeout lần {attempt + 1} cho {symbol}")
             if attempt < max_retries - 1:
-                time.sleep(2)
+                time.sleep(2 ** attempt)
+            else:
+                return None
+                
+        except requests.exceptions.ConnectionError:
+            logger.error(f"🌐 Lỗi kết nối lần {attempt + 1} cho {symbol}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"💥 Lỗi không xác định lần {attempt + 1} cho {symbol}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                return None
     
     return None
 
@@ -194,6 +214,7 @@ def add_indicators(df):
 # =============================================================================
 # 18 TRADING COMBOS (Đã bao gồm 2 combo mới)
 # =============================================================================
+
 def combo1_fvg_squeeze_pro(df):
     """FVG Squeeze Pro"""
     try:
@@ -204,7 +225,7 @@ def combo1_fvg_squeeze_pro(df):
                   last.bb_upper < last.kc_upper and 
                   last.bb_lower > last.kc_lower)
         breakout_up = last.close > last.bb_upper and prev.close <= prev.bb_upper
-        vol_spike = last.volume > last.volume_ma20 * 1.3  # ✅ SỬA: dùng last.volume_ma20
+        vol_spike = last.volume > last.volume_ma20 * 1.3
         trend_up = last.close > last.ema200
         rsi_ok = last.rsi14 < 68
         
@@ -236,8 +257,8 @@ def combo2_macd_ob_retest(df):
         price_above_ema200 = last.close > last.ema200
         
         ob_zone = None
-        if all(df["close"].iloc[-3:] > df["open"].iloc[-3:]):  # ✅ SỬA: dùng .iloc
-            ob_zone = df["low"].iloc[-5:-2].min()  # ✅ SỬA: dùng .iloc
+        if all(df["close"].iloc[-3:] > df["open"].iloc[-3:]):
+            ob_zone = df["low"].iloc[-5:-2].min()
         
         retest = ob_zone is not None and last.low <= ob_zone + last.atr * 0.5
         vol_confirm = last.volume > df["volume"].mean() * 1.1
@@ -288,7 +309,7 @@ def combo4_fvg_ema_pullback(df):
         fvg_bull_zones = df[df["fvg_bull"]]
         fvg_pullback = False
         
-        if not fvg_bull_zones.empty and df["fvg_bull"].iloc[-5:].any():  # ✅ SỬA: .iloc + .any()
+        if not fvg_bull_zones.empty and df["fvg_bull"].iloc[-5:].any():
             fvg_pullback = last.low <= fvg_bull_zones["high"].max()
         
         cross_up = last.ema8 > last.ema21 and df["ema8"].iloc[-2] <= df["ema21"].iloc[-2]
@@ -313,12 +334,12 @@ def combo5_fvg_macd_divergence(df):
         low = df["low"]
         
         divergence = hist.iloc[-1] > hist.iloc[-3] and low.iloc[-1] < low.iloc[-3]
-        fvg = df["fvg_bull"].iloc[-8:].any()  # ✅ SỬA: .iloc + .any()
+        fvg = df["fvg_bull"].iloc[-8:].any()
         rsi_ok = last.rsi14 < 30
         
         if divergence and fvg and rsi_ok:
             entry = last.close
-            sl = low.iloc[-5:].min() - last.atr  # ✅ SỬA: .iloc
+            sl = low.iloc[-5:].min() - last.atr
             tp = entry + 2.5 * last.atr
             return "LONG", entry, sl, tp, "FVG + MACD Divergence"
             
@@ -332,7 +353,7 @@ def combo6_ob_liquidity_grab(df):
     try:
         last = df.iloc[-1]
         
-        ob = df["low"].iloc[-6:-3].min()  # ✅ SỬA: .iloc
+        ob = df["low"].iloc[-6:-3].min()
         liquidity_grab = (last.lower_wick / last.body > 2.5) if last.body > 0 else False
         retest_ob = last.close > ob
         macd_pos = last.macd_hist > 0
@@ -354,8 +375,8 @@ def combo7_stop_hunt_fvg_retest(df):
         last = df.iloc[-1]
         
         stop_hunt = (last.lower_wick / last.body > 2) if last.body > 0 else False
-        fvg_after = df["fvg_bull"].iloc[-3:]  # ✅ SỬA: .iloc
-        retest = (last.low <= df["high"].shift(1).max()) if fvg_after.any() else False  # ✅ SỬA: .any()
+        fvg_after = df["fvg_bull"].iloc[-3:]
+        retest = (last.low <= df["high"].shift(1).max()) if fvg_after.any() else False
         
         if stop_hunt and fvg_after.any() and retest:
             entry = last.close
@@ -373,10 +394,6 @@ def combo8_fvg_macd_hist_spike(df):
     try:
         last = df.iloc[-1]
         
-        # ❌ HIỆN TẠI: Có thể gặp lỗi shape không khớp
-        # hist_spike = (df["macd_hist"].iloc[-3:].values > df["macd_hist"].iloc[-4:-1].values).all()
-        
-        # ✅ SỬA THÀNH:
         if len(df) >= 5:
             current_hist = df["macd_hist"].iloc[-3:].values
             prev_hist = df["macd_hist"].iloc[-4:-1].values
@@ -406,11 +423,11 @@ def combo9_ob_fvg_confluence(df):
     try:
         last = df.iloc[-1]
         
-        ob = df["low"].iloc[-10:-5].min()  # ✅ SỬA: .iloc
+        ob = df["low"].iloc[-10:-5].min()
         fvg_bull_zones = df[df["fvg_bull"]]
         fvg_zone = 0
         
-        if not fvg_bull_zones.empty and df["fvg_bull"].iloc[-10:].any():  # ✅ SỬA: .iloc + .any()
+        if not fvg_bull_zones.empty and df["fvg_bull"].iloc[-10:].any():
             fvg_zone = fvg_bull_zones["high"].max()
         
         confluence = (abs(ob - fvg_zone) < last.atr * 0.5) if fvg_zone > 0 else False
@@ -434,10 +451,10 @@ def combo10_smc_ultimate(df):
         last = df.iloc[-1]
         
         squeeze = last.bb_width < SQUEEZE_THRESHOLD
-        fvg = df["fvg_bull"].iloc[-5:].any()  # ✅ SỬA: .iloc + .any()
+        fvg = df["fvg_bull"].iloc[-5:].any()
         macd_up = last.macd_hist > 0 and last.macd_hist > df["macd_hist"].iloc[-2]
         liquidity = (last.lower_wick / last.body > 2) if last.body > 0 else False
-        ob_retest = last.low <= df["low"].iloc[-5:-2].min()  # ✅ SỬA: .iloc
+        ob_retest = last.low <= df["low"].iloc[-5:-2].min()
         
         if squeeze and fvg and macd_up and liquidity and ob_retest:
             entry = last.close
@@ -456,16 +473,16 @@ def combo11_fvg_ob_liquidity_break(df):
         last = df.iloc[-1]
         
         # FVG bullish
-        fvg = last.fvg_bull or df["fvg_bull"].iloc[-3:].any()  # ✅ SỬA: .iloc + .any()
+        fvg = last.fvg_bull or df["fvg_bull"].iloc[-3:].any()
         
         # Order Block
-        ob = df["low"].iloc[-5:].min()  # ✅ SỬA: .iloc
+        ob = df["low"].iloc[-5:].min()
         
         # Liquidity Break
-        liquidity_break = last.close > df["high"].iloc[-5:].max()  # ✅ SỬA: .iloc
+        liquidity_break = last.close > df["high"].iloc[-5:].max()
         
         # Volume
-        vol_spike = last.volume > last.volume_ma20 * 1.5  # ✅ SỬA: last.volume_ma20
+        vol_spike = last.volume > last.volume_ma20 * 1.5
         
         if fvg and liquidity_break and vol_spike:
             entry = last.close
@@ -489,7 +506,7 @@ def combo12_liquidity_grab_fvg_retest(df):
         # FVG Retest
         fvg_zones = df[df["fvg_bull"]]
         fvg_retest = False
-        if not fvg_zones.empty and df["fvg_bull"].iloc[-5:].any():  # ✅ SỬA: .iloc + .any()
+        if not fvg_zones.empty and df["fvg_bull"].iloc[-5:].any():
             fvg_retest = last.low <= fvg_zones["high"].max()
         
         # MACD
@@ -507,12 +524,12 @@ def combo12_liquidity_grab_fvg_retest(df):
     return None
 
 def combo13_fvg_macd_momentum_scalp(df):
-    """COMBO 13: FVG + MACD Momentum Scalp (✅ ĐÃ SỬA HOÀN CHỈNH)"""
+    """COMBO 13: FVG + MACD Momentum Scalp"""
     try:
         last = df.iloc[-1]
         
         # FVG recent
-        fvg = df["fvg_bull"].iloc[-2:].any() and last.close > last.open  # ✅ SỬA: .iloc + .any()
+        fvg = df["fvg_bull"].iloc[-2:].any() and last.close > last.open
         
         # MACD momentum
         macd_mom = last.macd > last.macd_signal and abs(last.macd_hist) > abs(df["macd_hist"].iloc[-2])
@@ -523,7 +540,7 @@ def combo13_fvg_macd_momentum_scalp(df):
         # Low volatility
         low_vol = (last.atr / last.close) < 0.02
         
-        if fvg and macd_mom and above_vwap and low_vol:  # ✅ SỬA: lỗi chính tả "and" thay vì "andkhông"
+        if fvg and macd_mom and above_vwap and low_vol:
             entry = last.close
             sl = last.low - 0.5 * last.atr
             tp = entry + 1.2 * last.atr
@@ -535,12 +552,12 @@ def combo13_fvg_macd_momentum_scalp(df):
     return None
 
 def combo14_ob_liquidity_macd_div(df):
-    """COMBO 14: Order Block + Liquidity + MACD Divergence (✅ ĐÃ SỬA HOÀN CHỈNH)"""
+    """COMBO 14: Order Block + Liquidity + MACD Divergence"""
     try:
         last = df.iloc[-1]
         
         # Order Block
-        ob = df["low"].iloc[-7:-2].min()  # ✅ SỬA: .iloc
+        ob = df["low"].iloc[-7:-2].min()
         
         # Liquidity sweep
         liquidity = (last.lower_wick / last.body > 2.0) if last.body > 0 else False
@@ -556,7 +573,7 @@ def combo14_ob_liquidity_macd_div(df):
             entry = last.close
             sl = ob - 0.3 * last.atr
             tp = entry + 2.5 * last.atr
-            return "LONG", entry, sl, tp, "OB Liquidity MACD Div"  # ✅ SỬA: Thêm return
+            return "LONG", entry, sl, tp, "OB Liquidity MACD Div"
             
     except Exception as e:
         logger.error(f"Combo14 error: {e}")
@@ -564,7 +581,7 @@ def combo14_ob_liquidity_macd_div(df):
     return None
 
 def combo15_vwap_ema_volume_scalp(df):
-    """COMBO 15: VWAP + EMA Cross + Volume Spike Scalp (✅ MỚI)"""
+    """COMBO 15: VWAP + EMA Cross + Volume Spike Scalp"""
     try:
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -576,7 +593,7 @@ def combo15_vwap_ema_volume_scalp(df):
         above_vwap = last.close > last.vwap
         
         # Volume spike (180% of 20-period average)
-        vol_spike = last.volume > last.volume_ma20 * 1.8  # ✅ SỬA: last.volume_ma20
+        vol_spike = last.volume > last.volume_ma20 * 1.8
         
         # RSI not overbought (below 60)
         rsi_ok = last.rsi14 < 60
@@ -593,7 +610,7 @@ def combo15_vwap_ema_volume_scalp(df):
     return None
 
 def combo16_rsi_extreme_bounce(df):
-    """COMBO 16: RSI Extreme + Price Action Bounce (✅ MỚI)"""
+    """COMBO 16: RSI Extreme + Price Action Bounce"""
     try:
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -622,7 +639,7 @@ def combo16_rsi_extreme_bounce(df):
                        last.close < last.open) if last.body > 0 else False
         
         # Volume confirmation
-        vol_ok = last.volume > last.volume_ma20 * 1.2  # ✅ SỬA: last.volume_ma20
+        vol_ok = last.volume > last.volume_ma20 * 1.2
         
         # LONG: RSI oversold + bullish pattern
         if rsi_oversold and (bullish_engulfing or hammer) and vol_ok:
@@ -643,11 +660,8 @@ def combo16_rsi_extreme_bounce(df):
     
     return None
 
-# Thêm 2 combo mới
 def combo17_ema_stack_volume_confirmation(df):
-    """
-    COMBO 17: EMA Stack + Volume Confirmation
-    """
+    """COMBO 17: EMA Stack + Volume Confirmation"""
     try:
         last = df.iloc[-1]
         
@@ -688,9 +702,7 @@ def combo17_ema_stack_volume_confirmation(df):
     return None
 
 def combo18_support_resistance_break_retest(df):
-    """
-    COMBO 18: Support/Resistance Break + Retest
-    """
+    """COMBO 18: Support/Resistance Break + Retest"""
     try:
         last = df.iloc[-1]
         prev = df.iloc[-2]
@@ -714,7 +726,7 @@ def combo18_support_resistance_break_retest(df):
         retest_confirmation = False
         if resistance_break:
             # Retest resistance trở thành support
-            retest_confirmation = (last.low <= (resistance_level + last.atr * 0.2) and # Cho phép retest sâu hơn 1 chút
+            retest_confirmation = (last.low <= (resistance_level + last.atr * 0.2) and
                                    last.close > resistance_level)
         elif support_break:
             # Retest support trở thành resistance
@@ -745,7 +757,7 @@ def combo18_support_resistance_break_retest(df):
     return None
 
 # =============================================================================
-# UTILITY FUNCTIONS (Đã sửa đổi)
+# UTILITY FUNCTIONS
 # =============================================================================
 
 def check_cooldown(symbol, combo_name, all_signals):
@@ -761,10 +773,9 @@ def check_cooldown(symbol, combo_name, all_signals):
     return True
 
 # =============================================================================
-# MAIN SCANNING FUNCTION (Đã sửa đổi)
+# MAIN SCANNING FUNCTION - ĐÃ SỬA VỚI DEBUG LOGGING
 # =============================================================================
 
-def scan():
 def scan():
     """Hàm quét chính - với logging chi tiết để debug"""
     logger.info(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}] 🔍 Bắt đầu chu kỳ quét {len(COINS)} coins...")
@@ -884,7 +895,7 @@ def scan():
     logger.info(f"✅ Quét xong. Tìm thấy {signals_found_this_run} tín hiệu mới trong lần quét này.")
 
 # =============================================================================
-# FLASK API ROUTES (Cung cấp data cho Frontend)
+# FLASK API ROUTES
 # =============================================================================
 
 @app.route('/api/signals')
@@ -988,20 +999,18 @@ def vote_signal(signal_id, vote_type):
     })
 
 # =============================================================================
-# FLASK HTML ROUTES (Trang web)
+# FLASK HTML ROUTES
 # =============================================================================
 
 @app.route('/')
 def index():
     """Render trang chủ (index.html)"""
-    # index.html sẽ chứa cả dashboard và bảng tín hiệu
     return render_template('index.html')
 
 # =============================================================================
-# MAIN EXECUTION
+# MAIN EXECUTION - ĐÃ SỬA
 # =============================================================================
 
-# Hàm này được gọi bởi render.yaml (worker)
 def run_scheduler():
     """
     Chạy BackgroundScheduler ở chế độ CRON.
@@ -1011,12 +1020,7 @@ def run_scheduler():
     # Luôn chỉ định timezone là UTC để cron chạy đúng
     scheduler = BackgroundScheduler(timezone="UTC") 
     
-    # XÓA DÒNG CŨ:
-    # scheduler.add_job(scan, 'interval', minutes=SCAN_INTERVAL_MINUTES)
-    
-    # THÊM DÒNG MỚI (Sử dụng 'cron' để đồng bộ với nến 15m):
-    # Nến 15m đóng vào các phút: 00, 15, 30, 45.
-    # Chúng ta chạy bot vào các phút: 1, 16, 31, 46 (luôn +1 phút đệm).
+    # Sử dụng 'cron' để đồng bộ với nến 15m
     scheduler.add_job(scan, 'cron', minute='1,16,31,46') 
     
     # Chạy lần quét đầu tiên ngay lập tức khi worker khởi động
@@ -1037,8 +1041,6 @@ def run_scheduler():
         scheduler.shutdown()
         logger.info("Scheduler đã dừng.")
 
-# THAY THẾ đoạn code __main__ bằng:
-
 if __name__ == "__main__":
     # LUÔN chạy scheduler, cả trên Render và local
     logger.info("🚀 Khởi chạy Scheduler (Render + Local)...")
@@ -1051,4 +1053,3 @@ if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🌐 Khởi chạy Flask server tại http://0.0.0.0:{port}...")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
